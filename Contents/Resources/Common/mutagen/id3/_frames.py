@@ -6,7 +6,7 @@
 # it under the terms of version 2 of the GNU General Public License as
 # published by the Free Software Foundation.
 
-import zlib
+import zlib, hashlib
 from struct import unpack
 
 from ._util import ID3JunkFrameError, ID3EncryptionUnsupportedError, unsynch
@@ -951,7 +951,7 @@ class SYLT(Frame):
 
     @property
     def HashKey(self):
-        return '%s:%s:%s' % (self.FrameID, self.desc, self.lang)
+        return '%s:%s:%s:%s' % (self.FrameID, self.desc, self.lang, hashlib.md5(self.data).hexdigest())
 
     def __eq__(self, other):
         return str(self) == other
