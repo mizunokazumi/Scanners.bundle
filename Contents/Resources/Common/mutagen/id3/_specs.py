@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 # Copyright (C) 2005  Michael Urman
 #
 # This program is free software; you can redistribute it and/or modify
@@ -6,14 +8,18 @@
 
 import struct
 from struct import unpack, pack
-from warnings import warn
 
-from ._compat import text_type, chr_, PY3, swap_to_string, string_types
-from mutagen._id3util import ID3JunkFrameError, ID3Warning, BitPaddedInt
-from mutagen._util import total_ordering, decode_terminated
+from .._compat import text_type, chr_, PY3, swap_to_string, string_types
+from .._util import total_ordering, decode_terminated, enum
+from ._util import BitPaddedInt
+
+
+class SpecError(Exception):
+    pass
 
 
 class Spec(object):
+
     def __init__(self, name):
         self.name = name
 
@@ -26,6 +32,19 @@ class Spec(object):
         """
 
         return value
+
+    def read(self, frame, data):
+        """Returns the (value, left_data) or raises SpecError"""
+
+        raise NotImplementedError
+
+    def write(self, frame, value):
+        raise NotImplementedError
+
+    def validate(self, frame, value):
+        """Returns the validated data or raises ValueError/TypeError"""
+
+        raise NotImplementedError
 
 
 class ByteSpec(Spec):
@@ -43,7 +62,7 @@ class ByteSpec(Spec):
 
 class IntegerSpec(Spec):
     def read(self, frame, data):
-        return int(BitPaddedInt(data, bits=8)), ''
+        return int(BitPaddedInt(data, bits=8)), b''
 
     def write(self, frame, value):
         return BitPaddedInt.to_str(value, bits=8, width=-1)
@@ -66,49 +85,80 @@ class SizedIntegerSpec(Spec):
         return value
 
 
+@enum
+class Encoding(object):
+    LATIN1 = 0
+    UTF16 = 1
+    UTF16BE = 2
+    UTF8 = 3
+
+
 class EncodingSpec(ByteSpec):
+
     def read(self, frame, data):
         enc, data = super(EncodingSpec, self).read(frame, data)
-        if enc < 16:
-            return enc, data
-        else:
-            return 0, chr_(enc) + data
+        if enc not in (Encoding.LATIN1, Encoding.UTF16, Encoding.UTF16BE,
+                       Encoding.UTF8):
+            raise SpecError('Invalid Encoding: %r' % enc)
+        return enc, data
 
     def validate(self, frame, value):
         if value is None:
             return None
-        if 0 <= value <= 3:
-            return value
-        raise ValueError('Invalid Encoding: %r' % value)
+        if value not in (Encoding.LATIN1, Encoding.UTF16, Encoding.UTF16BE,
+                         Encoding.UTF8):
+            raise ValueError('Invalid Encoding: %r' % value)
+        return value
 
     def _validate23(self, frame, value, **kwargs):
         # only 0, 1 are valid in v2.3, default to utf-16
-        return min(1, value)
+        if value not in (Encoding.LATIN1, Encoding.UTF16):
+            value = Encoding.UTF16
+        return value
 
 
 class StringSpec(Spec):
+    """A fixed size ASCII only payload."""
+
     def __init__(self, name, length):
         super(StringSpec, self).__init__(name)
         self.len = length
 
     def read(s, frame, data):
-        return data[:s.len], data[s.len:]
+        chunk = data[:s.len]
+        try:
+            ascii = chunk.decode("ascii")
+        except UnicodeDecodeError:
+            raise SpecError("not ascii")
+        else:
+            if PY3:
+                chunk = ascii
+
+        return chunk, data[s.len:]
 
     def write(s, frame, value):
         if value is None:
             return b'\x00' * s.len
         else:
+            if PY3:
+                value = value.encode("ascii")
             return (bytes(value) + b'\x00' * s.len)[:s.len]
 
     def validate(s, frame, value):
         if value is None:
             return None
 
-        if not isinstance(value, bytes):
-            value = value.encode("ascii")
+        if PY3:
+            if not isinstance(value, str):
+                raise TypeError("%s has to be str" % s.name)
+            value.encode("ascii")
+        else:
+            if not isinstance(value, bytes):
+                value = value.encode("ascii")
 
         if len(value) == s.len:
             return value
+
         raise ValueError('Invalid StringSpec[%d] data: %r' % (s.len, value))
 
 
@@ -125,22 +175,26 @@ class BinaryDataSpec(Spec):
         return value
 
     def validate(self, frame, value):
+        if value is None:
+            return None
+
         if isinstance(value, bytes):
             return value
+        elif PY3:
+            raise TypeError("%s has to be bytes" % self.name)
+
         value = text_type(value).encode("ascii")
         return value
 
 
 class EncodedTextSpec(Spec):
-    # Okay, seriously. This is private and defined explicitly and
-    # completely by the ID3 specification. You can't just add
-    # encodings here however you want.
-    _encodings = (
-        ('latin1', b'\x00'),
-        ('utf16', b'\x00\x00'),
-        ('utf_16_be', b'\x00\x00'),
-        ('utf8', b'\x00')
-    )
+
+    _encodings = {
+        Encoding.LATIN1: ('latin1', b'\x00'),
+        Encoding.UTF16: ('utf16', b'\x00\x00'),
+        Encoding.UTF16BE: ('utf_16_be', b'\x00\x00'),
+        Encoding.UTF8: ('utf8', b'\x00'),
+    }
 
     def read(self, frame, data):
         enc, term = self._encodings[frame.encoding]
@@ -156,7 +210,7 @@ class EncodedTextSpec(Spec):
             try:
                 return decode_terminated(data + b"\x00", enc)
             except ValueError:
-                raise ID3JunkFrameError
+                raise SpecError("Decoding error")
 
     def write(self, frame, value):
         enc, term = self._encodings[frame.encoding]
@@ -348,20 +402,20 @@ class ChannelSpec(ByteSpec):
 class VolumeAdjustmentSpec(Spec):
     def read(self, frame, data):
         value, = unpack('>h', data[0:2])
-        return value/512.0, data[2:]
+        return value / 512.0, data[2:]
 
     def write(self, frame, value):
         number = int(round(value * 512))
         # pack only fails in 2.7, do it manually in 2.6
         if not -32768 <= number <= 32767:
-            raise struct.error
+            raise SpecError("not in range")
         return pack('>h', number)
 
     def validate(self, frame, value):
         if value is not None:
             try:
                 self.write(frame, value)
-            except struct.error:
+            except SpecError:
                 raise ValueError("out of range")
         return value
 
@@ -370,23 +424,24 @@ class VolumePeakSpec(Spec):
     def read(self, frame, data):
         # http://bugs.xmms.org/attachment.cgi?id=113&action=view
         peak = 0
-        bits = ord(data[0])
-        bytes = min(4, (bits + 7) >> 3)
+        data_array = bytearray(data)
+        bits = data_array[0]
+        vol_bytes = min(4, (bits + 7) >> 3)
         # not enough frame data
-        if bytes + 1 > len(data):
-            raise ID3JunkFrameError
-        shift = ((8 - (bits & 7)) & 7) + (4 - bytes) * 8
-        for i in range(1, bytes+1):
+        if vol_bytes + 1 > len(data):
+            raise SpecError("not enough frame data")
+        shift = ((8 - (bits & 7)) & 7) + (4 - vol_bytes) * 8
+        for i in range(1, vol_bytes + 1):
             peak *= 256
-            peak += ord(data[i])
+            peak += data_array[i]
         peak *= 2 ** shift
-        return (float(peak) / (2**31-1)), data[1+bytes:]
+        return (float(peak) / (2 ** 31 - 1)), data[1 + vol_bytes:]
 
     def write(self, frame, value):
         number = int(round(value * 32768))
         # pack only fails in 2.7, do it manually in 2.6
         if not 0 <= number <= 65535:
-            raise struct.error
+            raise SpecError("not in range")
         # always write as 16 bits for sanity.
         return b"\x10" + pack('>H', number)
 
@@ -394,7 +449,7 @@ class VolumePeakSpec(Spec):
         if value is not None:
             try:
                 self.write(frame, value)
-            except struct.error:
+            except SpecError:
                 raise ValueError("out of range")
         return value
 
@@ -407,15 +462,15 @@ class SynchronizedTextSpec(EncodedTextSpec):
             try:
                 value, data = decode_terminated(data, encoding)
             except ValueError:
-                raise ID3JunkFrameError
+                raise SpecError("decoding error")
 
             if len(data) < 4:
-                raise ID3JunkFrameError
+                raise SpecError("not enough data")
             time, = struct.unpack(">I", data[:4])
 
             texts.append((value, time))
             data = data[4:]
-        return texts, ""
+        return texts, b""
 
     def write(self, frame, value):
         data = []
@@ -438,7 +493,7 @@ class KeyEventSpec(Spec):
         return events, data
 
     def write(self, frame, value):
-        return b"".join([struct.pack(">bI", *event) for event in value])
+        return b"".join(struct.pack(">bI", *event) for event in value)
 
     def validate(self, frame, value):
         return value
@@ -454,14 +509,13 @@ class VolumeAdjustmentsSpec(Spec):
             freq /= 2.0
             adj /= 512.0
             adjustments[freq] = adj
-        adjustments = adjustments.items()
-        adjustments.sort()
+        adjustments = sorted(adjustments.items())
         return adjustments, data
 
     def write(self, frame, value):
         value.sort()
-        return b"".join([struct.pack(">Hh", int(freq * 2), int(adj * 512))
-                         for (freq, adj) in value])
+        return b"".join(struct.pack(">Hh", int(freq * 2), int(adj * 512))
+                        for (freq, adj) in value)
 
     def validate(self, frame, value):
         return value
@@ -476,12 +530,14 @@ class ASPIIndexSpec(Spec):
             format = "B"
             size = 1
         else:
-            warn("invalid bit count in ASPI (%d)" % frame.b, ID3Warning)
-            return [], data
+            raise SpecError("invalid bit count in ASPI (%d)" % frame.b)
 
         indexes = data[:frame.N * size]
         data = data[frame.N * size:]
-        return list(struct.unpack(">" + format * frame.N, indexes)), data
+        try:
+            return list(struct.unpack(">" + format * frame.N, indexes)), data
+        except struct.error as e:
+            raise SpecError(e)
 
     def write(self, frame, values):
         if frame.b == 16:
@@ -489,8 +545,11 @@ class ASPIIndexSpec(Spec):
         elif frame.b == 8:
             format = "B"
         else:
-            raise ValueError("frame.b must be 8 or 16")
-        return struct.pack(">" + format * frame.N, *values)
+            raise SpecError("frame.b must be 8 or 16")
+        try:
+            return struct.pack(">" + format * frame.N, *values)
+        except struct.error as e:
+            raise SpecError(e)
 
     def validate(self, frame, values):
         return values
