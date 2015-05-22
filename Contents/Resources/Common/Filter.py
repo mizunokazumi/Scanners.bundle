@@ -1,4 +1,6 @@
 import os, re, fnmatch, glob
+from mutagen import mp3, mp4
+from UnicodeHelper import toBytes
 import Utils
 
 IGNORE_DIRS = ['@eaDir', '.*_UNPACK_.*', '.*_FAILED_.*', '\..*', 'lost\+found', '.AppleDouble', '.*\.itlp$']
@@ -68,7 +70,7 @@ def Scan(path, files, mediaList, subdirs, exts, root=None):
     if not os.access(filename, os.R_OK):
       # If access() claims the file is unreadable, try to read a byte just to be sure.
       try:
-        read_file = open(filename,'rb')
+        read_file = open(f,'rb')
         read_file.read(1)
         read_file.close()
       except:
@@ -82,6 +84,16 @@ def Scan(path, files, mediaList, subdirs, exts, root=None):
     for rx in plexignore_files:
       if re.match(rx, os.path.basename(f), re.IGNORECASE):
         files_to_whack.append(f)
+
+    # Remove files that look DRM'd.
+    try:
+      mp4_file = open(f, 'rb')
+      codec = mp4.MP4Info(mp4.Atoms(mp4_file), mp4_file).codec
+      if codec in ['drms', 'enca', 'encv']:
+        Utils.Log('Skipping file %s because it looks DRM-protected (has codec: %s)' % (toBytes(f), codec))
+        files_to_whack.append(f)
+    except:
+      pass
 
   # See what directories to ignore.
   ignore_dirs_total = IGNORE_DIRS
