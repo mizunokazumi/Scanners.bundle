@@ -49,6 +49,7 @@ def Scan(path, files, mediaList, subdirs, language=None, root=None):
   # Take top two as show/season, but require at least the top one.
   paths = Utils.SplitPath(path)
   shouldStack = True
+  num_unknown = 0
   
   if len(paths) == 1 and len(paths[0]) == 0:
   
@@ -351,7 +352,17 @@ def Scan(path, files, mediaList, subdirs, language=None, root=None):
               break
           
         if done == False:
+          num_unknown += 1
           print "Got nothing for:", file
+          the_season = 1
+
+          # Now look for a season.
+          if seasonNumber is not None:
+            the_season = seasonNumber
+
+          tv_show = Media.Episode(show, the_season, 1000 + num_unknown, None, year)
+          tv_show.parts.append(i)
+          mediaList.append(tv_show)
           
   # Stack the results.
   if shouldStack:
