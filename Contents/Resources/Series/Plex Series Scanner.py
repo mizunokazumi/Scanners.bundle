@@ -32,7 +32,8 @@ just_episode_regexs = [
     '.*?[ \.\-_](?P<ep>[0-9]{2,3})[^0-9c-uw-z%]+',         # Flah - 04 - Blah
     '.*?[ \.\-_](?P<ep>[0-9]{2,3})$',                      # Flah - 04
     '.*?[^0-9x](?P<ep>[0-9]{2,3})$',                       # Flah707
-    '^(?P<ep>[0-9]{1,3})$'                                 # 01
+    '^(?P<ep>[0-9]{1,3})$',                                # 01
+    '\[(?P<ep>[0-9]{1,3})\]'                               # [01]
   ]
 
 ends_with_number = '.*([0-9]{1,2})$'
@@ -291,14 +292,14 @@ def Scan(path, files, mediaList, subdirs, language=None, root=None):
           # Begin by cleaning the filename to remove garbage like "h.264" that could throw
           # things off.
           #
-          (file, fileYear) = VideoFiles.CleanName(file)
+          (cleanName, fileYear) = VideoFiles.CleanName(file)
 
           # if don't have a good year from before (when checking the parent folders) AND we just got a good year, use it.
           if not year and fileYear: 
             year = fileYear
 
           for rx in just_episode_regexs:
-            episode_match = re.search(rx, file, re.IGNORECASE)
+            episode_match = re.search(rx, cleanName, re.IGNORECASE)
             if episode_match is not None:
               the_episode = int(episode_match.group('ep'))
               the_season = 1
@@ -315,6 +316,34 @@ def Scan(path, files, mediaList, subdirs, language=None, root=None):
               if rx == just_episode_regexs[0]:
                 shouldStack = False
               
+              tv_show = Media.Episode(show, the_season, the_episode, None, year)
+              tv_show.parts.append(i)
+              mediaList.append(tv_show)
+              done = True
+              break
+
+        if done == False:
+
+          # Last chance
+
+          for rx in just_episode_regexs:
+            episode_match = re.search(rx, file, re.IGNORECASE)
+            if episode_match is not None:
+              the_episode = int(episode_match.group('ep'))
+              the_season = 1
+
+              # Now look for a season.
+              if seasonNumber is not None:
+                the_season = seasonNumber
+
+                # See if we accidentally parsed the episode as season.
+                if the_episode >= 100 and int(the_episode / 100) == the_season:
+                  the_episode = the_episode % 100
+
+              # Prevent standalone eps matching the "XX of YY" regex from stacking.
+              if rx == just_episode_regexs[0]:
+                shouldStack = False
+
               tv_show = Media.Episode(show, the_season, the_episode, None, year)
               tv_show.parts.append(i)
               mediaList.append(tv_show)
